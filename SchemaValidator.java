@@ -1,6 +1,5 @@
-package com.saama.celgene;
+package com.spark.experiments;
 
-import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -14,6 +13,16 @@ import org.apache.spark.sql.DataFrame;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.ListObjectsRequest;
+import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
 
 /**
  * @author JD
@@ -27,8 +36,10 @@ import org.apache.spark.sql.types.StructType;
 
 public class SchemaValidator {
 
+	private static final Logger LOGGER = LoggerFactory.getLogger(SchemaValidator.class);
+	
 	public static void main(String[] args) {
-		// initializing spark context with s3 configuration
+		// initializing spark context
 		JavaSparkContext javaSparkContext = initializeSparkContext();
 
 		// comparing schema of csv file with predefined json file
@@ -41,18 +52,12 @@ public class SchemaValidator {
 	 * @return
 	 */
 	private static JavaSparkContext initializeSparkContext() {
-
+		
+		LOGGER.info("Initializing spark context");
 		final SparkConf sparkConf = new SparkConf().setAppName("Spark")
 				.setMaster("local[*]");
 		final JavaSparkContext javaSparkContext = new JavaSparkContext(
 				sparkConf);
-		javaSparkContext.hadoopConfiguration().set("fs.s3n.impl",
-				"org.apache.hadoop.fs.s3native.NativeS3FileSystem");
-		javaSparkContext.hadoopConfiguration().set("fs.s3n.awsAccessKeyId",
-				"Value of awsAccessKeyId");
-		javaSparkContext.hadoopConfiguration().set("fs.s3n.awsSecretAccessKey",
-				"Value of awsSecretAccessKey");
-
 		return javaSparkContext;
 	}
 
@@ -65,56 +70,60 @@ public class SchemaValidator {
 	 */
 	private static void validateSchema(JavaSparkContext javaSparkContext,
 			String[] args) {
-
+		
+		LOGGER.info("Example: json s3 Directory path =bucketName/src/folder1/ and csv s3 directory path=bucketName/src/folder2/");
+		
 		if (args.length != 2) {
 			throw new IllegalArgumentException(
-					"Validate schema method takes only two args : json Directory path and csv directory path");
+					"Validate schema method takes only two args : "
+					+ "json s3 Directory path(bucketName/src/folder1/) and csv s3 directory path(bucketName/src/folder2/)");
 		}
+		
 		final String jsonirectory = args[0];
 		final String csvDirectory = args[1];
 
+		LOGGER.info("Initializing spark-sql context");
 		final SQLContext sqlContext = new SQLContext(javaSparkContext);
 
 		// reading all input json files from s3
 		final Map<String, StructType> jsonSchemaMap = new HashMap<String, StructType>();
 		DataFrame jsonDf = null;
-		final List<File> jsonFiles = new ArrayList<File>();
-		listFiles(jsonirectory, jsonFiles);
-
+		
+		List<String> jsonFiles = listS3Files(jsonirectory);
 		for (int i = 0; i < jsonFiles.size(); i++) {
-			final File file = jsonFiles.get(i);
-			jsonDf = sqlContext.jsonFile(file.toString());
+			final String file = jsonFiles.get(i);
+			jsonDf = sqlContext.jsonFile(file);
 			jsonDf.persist();
 			jsonDf.show();
-			final String fileName = file.getName();
+			final String fileName = file.substring(file.lastIndexOf("/")+1);
 			final String name = fileName.substring(0, fileName.indexOf("."));
 
 			jsonSchemaMap.put(name, jsonDf.schema());
 		}
 
-		/*
-		 * We can persist jsonSchemaMap to hdfs/s3 for first time and then read
+		
+		/* We can persist jsonSchemaMap to hdfs/s3 for first time and then read
 		 * same schema object(StructType) from next time onwards to compare with
 		 * incoming csv files schema object. This way we will evaluate schema
 		 * from json files only for first time and will use same hdfs schema
 		 * object for future schema comparisions.
 		 * 
 		 * TO-DO
-		 */
+		 * */
+		 
 
 		// reading all input csv files from s3
 		DataFrame csvDf = null;
-		final List<File> csvFiles = new ArrayList<File>();
-		listFiles(csvDirectory, jsonFiles);
+		List<String> csvFiles = listS3Files(csvDirectory);
 		for (int i = 0; i < csvFiles.size(); i++) {
-			final File file = csvFiles.get(i);
+			final String file = csvFiles.get(i);
 			csvDf = sqlContext.read().format("com.databricks.spark.csv")
 					.option("header", "true").option("inferSchema", "true")
 					.load(file.toString());
 			csvDf.persist();
 			csvDf.show();
 
-			final String fileName = file.getName();
+			final String fileName = file.substring(file.lastIndexOf("/")+1);
 			final String csvName = fileName.substring(0, fileName.indexOf("."));
 
 			final StructType jsonSchema = jsonSchemaMap.get(csvName);
@@ -135,19 +144,28 @@ public class SchemaValidator {
 	 * directory path
 	 * 
 	 * @param directoryName
-	 * @param list
 	 */
-	private static void listFiles(String directoryName, List<File> list) {
-		File directory = new File(directoryName);
-		// get all nested the files from a directory
-		File[] files = directory.listFiles();
-		for (File file : files) {
-			if (file.isFile()) {
-				list.add(file);
-			} else if (file.isDirectory()) {
-				listFiles(file.getAbsolutePath(), list);
-			}
-		}
+	private static List<String> listS3Files(String directoryName)
+	{
+		 LOGGER.info("Connecting to amazon s3");
+	     AWSCredentials credentials = new BasicAWSCredentials("Value of awsAccessKeyId","Value of awsSecretAccessKey");
+	     AmazonS3 s3Client = new AmazonS3Client(credentials);
+	     
+	     String bucketName = directoryName.substring(0, directoryName.indexOf("/")-1);
+	     String prefix = directoryName.substring(directoryName.indexOf("/")+1);
+		 LOGGER.info("Connecting to given amazon s3 directory path");
+	     final ListObjectsRequest listObjectsRequest = new ListObjectsRequest().withBucketName(bucketName)
+	                .withPrefix(prefix);
+	     
+	     LOGGER.info("Listing objects under given amazon s3 directory path");
+	     ObjectListing objects = s3Client.listObjects(listObjectsRequest);
+	     final List<S3ObjectSummary> keyList = objects.getObjectSummaries();
+	     List<String> list = new ArrayList<String>();
+	     for (S3ObjectSummary s3ObjectSummary : keyList) 
+	     {
+	     list.add("s3a://"+s3ObjectSummary.getKey());
+	     }
+	     return list;
 	}
 
 	/**
@@ -160,6 +178,7 @@ public class SchemaValidator {
 			StructType csvSchema) {
 		String[] jsonFieldNames = jsonSchema.fieldNames();
 		String[] csvFieldNames = csvSchema.fieldNames();
+		LOGGER.info("Comparing no of columns in source and target");
 		if (jsonFieldNames.length != csvFieldNames.length) {
 			throw new IllegalArgumentException(
 					String.format(
@@ -184,6 +203,7 @@ public class SchemaValidator {
 		List<String> jsonFieldNames = Arrays.asList(jsonFields);
 		toLowerCase(jsonFieldNames);
 
+		LOGGER.info("Comparing column names and column sequences in source and target");
 		StructField[] csvFields = csvSchema.fields();
 		for (int i = 0; i < csvFields.length; i++) {
 
